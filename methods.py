@@ -288,3 +288,73 @@ def topsis(matrice, types, poids):
     classement = classement.sort_values("Rang")
 
     return creer_resultat(steps, classement)
+
+
+def _tfn_texte(L, M, U):
+    """Affiche trois DataFrames (l, m, u) sous forme de TFN lisibles : (l ; m ; u)."""
+    return L.copy().astype(object).combine(
+        M, lambda a, b: a
+    ) if False else pd.DataFrame(
+        {c: [f"({l:.3f} ; {m:.3f} ; {u:.3f})" for l, m, u in zip(L[c], M[c], U[c])]
+         for c in L.columns},
+        index=L.index,
+    )
+
+
+def fuzzy_topsis(matrice, types, poids, delta_x=0.10, delta_w=0.10):
+    """Fuzzy TOPSIS de Chen (2000), nombres flous triangulaires.
+    poids   : Series indexée par les critères, de somme 1 (poids nets)
+    delta_x : incertitude relative sur les données (0 à 0.5)
+    delta_w : incertitude relative sur les poids (0 à 0.5)"""
+    assert 0 <= delta_x <= 0.5 and 0 <= delta_w <= 0.5, "δ doit être compris entre 0 et 0.5."
+    assert list(poids.index) == list(matrice.columns), "Poids et critères désalignés."
+    assert np.isclose(poids.sum(), 1), "La somme des poids doit valoir 1."
+    steps = []
+
+    # 1) Fuzzification de la matrice et des poids
+    L, M, U = matrice * (1 - delta_x), matrice.astype(float), matrice * (1 + delta_x)
+    steps.append((f"Matrice floue (l ; m ; u)   avec δ_x = {delta_x}", _tfn_texte(L, M, U)))
+
+    wL, wM, wU = poids * (1 - delta_w), poids, (poids * (1 + delta_w)).clip(upper=1)
+    w_flou = pd.DataFrame({"Poids flous (l ; m ; u)":
+                           [f"({a:.4f} ; {b:.4f} ; {c:.4f})" for a, b, c in zip(wL, wM, wU)]},
+                          index=poids.index)
+    steps.append((f"Poids flous   avec δ_w = {delta_w}", w_flou))
+
+    # 2) Normalisation
+    RL, RM, RU = (matrice.astype(float).copy() for _ in range(3))
+    for c in matrice.columns:
+        if types[c] == "max":
+            u_star = U[c].max()
+            RL[c], RM[c], RU[c] = L[c] / u_star, M[c] / u_star, U[c] / u_star
+        else:
+            l_min = L[c].min()
+            RL[c], RM[c], RU[c] = l_min / U[c], l_min / M[c], l_min / L[c]
+    steps.append(("Matrice floue normalisée (bénéfice : /u*, coût : l-/·)", _tfn_texte(RL, RM, RU)))
+
+    # 3) Matrice pondérée
+    VL, VM, VU = RL * wL, RM * wM, RU * wU
+    steps.append(("Matrice floue pondérée  v = r ⊗ w", _tfn_texte(VL, VM, VU)))
+
+    # 4) Distances de chaque cellule à A+ = (1,1,1) et A- = (0,0,0)
+    dp_cell = np.sqrt(((VL - 1) ** 2 + (VM - 1) ** 2 + (VU - 1) ** 2) / 3)
+    dm_cell = np.sqrt((VL ** 2 + VM ** 2 + VU ** 2) / 3)
+    steps.append(("Distances de chaque cellule à l'idéal A+ = (1,1,1)", dp_cell))
+    steps.append(("Distances de chaque cellule à l'anti-idéal A- = (0,0,0)", dm_cell))
+
+    # 5) Distances totales
+    d_plus = dp_cell.sum(axis=1).rename("d+")
+    d_moins = dm_cell.sum(axis=1).rename("d-")
+    steps.append(("Distances totales  d+ = Σ_j d(v_ij, A+)   et   d- = Σ_j d(v_ij, A-)",
+                  pd.concat([d_plus, d_moins], axis=1)))
+
+    # 6) Coefficient de proximité
+    CC = (d_moins / (d_plus + d_moins)).rename("CC")
+    steps.append(("Coefficient de proximité  CC_i = d- / (d+ + d-)", CC))
+
+    # 7) Classement
+    classement = pd.DataFrame({"d+": d_plus, "d-": d_moins, "CC": CC})
+    classement["Rang"] = classement["CC"].rank(ascending=False, method="min").astype(int)
+    classement = classement.sort_values("Rang")
+
+    return creer_resultat(steps, classement)
